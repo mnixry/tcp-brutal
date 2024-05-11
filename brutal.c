@@ -2,6 +2,7 @@
 #include <linux/version.h>
 #include <net/tcp.h>
 #include <linux/math64.h>
+#include <linux/sysctl.h>
 
 #if IS_ENABLED(CONFIG_IPV6) && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
 #include <net/transp_v6.h>
@@ -73,6 +74,13 @@ struct brutal_params
     u64 rate;      // Send rate in bytes per second
     u32 cwnd_gain; // CWND gain in tenths (10=1.0)
 } __packed;
+
+static u64 tcp_brutal_default_params_rate = INIT_PACING_RATE;
+static u32 tcp_brutal_default_params_cwnd_gain = INIT_CWND_GAIN;
+static u64 tcp_brutal_default_params_rate_min = MIN_PACING_RATE;
+static u64 tcp_brutal_default_params_rate_max = U64_MAX;
+static u32 tcp_brutal_default_params_cwnd_gain_min = MIN_CWND_GAIN;
+static u32 tcp_brutal_default_params_cwnd_gain_max = MAX_CWND_GAIN;
 
 static struct proto tcp_prot_override __ro_after_init;
 #ifdef _TRANSP_V6_H
@@ -153,8 +161,8 @@ static void brutal_init(struct sock *sk)
 
     tp->snd_ssthresh = TCP_INFINITE_SSTHRESH;
 
-    brutal->rate = INIT_PACING_RATE;
-    brutal->cwnd_gain = INIT_CWND_GAIN;
+    brutal->rate = tcp_brutal_default_params_rate;
+    brutal->cwnd_gain = tcp_brutal_default_params_cwnd_gain;
 
     memset(brutal->slots, 0, sizeof(brutal->slots));
 
@@ -282,10 +290,40 @@ static struct tcp_congestion_ops tcp_brutal_ops = {
     .ssthresh = brutal_ssthresh,
 };
 
+// create sysctl entries
+static struct ctl_table brutal_table[] = {
+    {
+        .procname = "rate",
+        .maxlen = sizeof(tcp_brutal_default_params_rate),
+        .data = &tcp_brutal_default_params_rate,
+        .mode = 0644,
+        .proc_handler = proc_doulongvec_minmax,
+        .extra1 = &tcp_brutal_default_params_rate_min,
+        .extra2 = &tcp_brutal_default_params_rate_max,
+    },
+    {
+        .procname = "cwnd_gain",
+        .maxlen = sizeof(tcp_brutal_default_params_cwnd_gain),
+        .data = &tcp_brutal_default_params_cwnd_gain,
+        .mode = 0644,
+        .proc_handler = proc_douintvec_minmax,
+        .extra1 = &tcp_brutal_default_params_cwnd_gain_min,
+        .extra2 = &tcp_brutal_default_params_cwnd_gain_max,
+    },
+    {},
+};
+
+static struct ctl_table_header *brutal_table_header;
+
 static int __init brutal_register(void)
 {
     BUILD_BUG_ON(sizeof(struct brutal) > ICSK_CA_PRIV_SIZE);
     BUILD_BUG_ON(PKT_INFO_SLOTS < 1);
+
+    brutal_table_header = register_net_sysctl(&init_net, "net/tcp_brutal", brutal_table);
+
+    if (!brutal_table_header)
+        return -ENOMEM;
 
     tcp_prot_override = tcp_prot;
     tcp_prot_override.setsockopt = brutal_tcp_setsockopt;
@@ -300,6 +338,7 @@ static int __init brutal_register(void)
 
 static void __exit brutal_unregister(void)
 {
+    unregister_net_sysctl_table(brutal_table_header);
     tcp_unregister_congestion_control(&tcp_brutal_ops);
 }
 
